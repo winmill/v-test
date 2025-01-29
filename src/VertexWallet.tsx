@@ -10,14 +10,21 @@ import {
   useAppKitProvider,
   useWalletInfo,
   useAppKitAccount,
+  useAppKitNetwork,
 } from "@reown/appkit/react";
+import { arbitrumSepolia } from "@reown/appkit/networks";
 
-import { createDeterministicLinkedSignerPrivateKey } from "@vertex-protocol/contracts";
 import { createVertexClient, VertexClient } from "@vertex-protocol/client";
-import { PlaceOrderParams, OrderExpirationType } from "@vertex-protocol/client";
+import {
+  PlaceOrderParams,
+  OrderExpirationType,
+  subaccountToHex,
+} from "@vertex-protocol/client";
 import { getExpirationTimestamp } from "@vertex-protocol/contracts";
 import { nowInSeconds, toFixedPoint } from "@vertex-protocol/utils";
 import { BigDecimal, toPrintableObject } from "@vertex-protocol/utils";
+
+const targetNetwork = arbitrumSepolia;
 
 const VertexWallet = () => {
   const [signer, setSigner] = useState<JsonRpcSigner | undefined>(undefined);
@@ -33,16 +40,74 @@ const VertexWallet = () => {
 
   const { walletInfo } = useWalletInfo();
   const { walletProvider } = useAppKitProvider("eip155");
+  const { switchNetwork } = useAppKitNetwork();
 
+  useEffect(() => {
+    if (!walletProvider) {
+      setSigner(undefined);
+      setWalletKey(undefined);
+      setVertexWallet(undefined);
+      setVertexClient(undefined);
+    }
+  }, [walletProvider]);
+
+  const createLink = async () => {
+    try {
+      if (walletProvider) {
+        switchNetwork(targetNetwork);
+        const provider = new BrowserProvider(walletProvider as Eip1193Provider);
+        const signer = await provider.getSigner();
+        setSigner(signer);
+        console.log(signer);
+        if (signer) {
+          const client = createVertexClient("arbitrumTestnet", {
+            signerOrProvider: signer,
+          });
+          if (client) {
+            const linkedWallet =
+              await client.subaccount.createStandardLinkedSigner(
+                subaccountName
+              );
+            console.log(linkedWallet);
+            if (linkedWallet) {
+              // setVertexWallet(linkedWallet);
+              const ret = await client.subaccount.linkSigner({
+                signer: subaccountToHex({
+                  subaccountOwner: linkedWallet.address,
+                  subaccountName: "",
+                }),
+                subaccountName,
+              });
+              if (ret.status === "success") {
+                console.log("link success");
+                setVertexClient(client);
+              } else {
+                console.log("link failed");
+              }
+            }
+          }
+        }
+      }
+    } catch (err) {
+      const error = err as Error;
+      console.warn(error.name);
+    }
+
+    // show remaining linked signer switches
+    await checkRemaining(address);
+  };
+
+  /*
   const onSignMessage = async () => {
     try {
       if (walletProvider) {
+        switchNetwork(targetNetwork);
         const provider = new BrowserProvider(walletProvider as Eip1193Provider);
         const signer = await provider.getSigner();
         setSigner(signer);
         if (signer) {
           const key = await createDeterministicLinkedSignerPrivateKey({
-            chainId: 421614,
+            chainId: targetNetwork.id,
             endpointAddress: "0xadefde1a14b6ba4da3e82414209408a49930e8dc",
             signer: signer,
             subaccountName: "default",
@@ -60,31 +125,32 @@ const VertexWallet = () => {
       const error = err as Error;
       console.warn(error.name);
     }
+
+    // show remaining linked signer switches
+    await showRemaining(address);
   };
+  */
 
-  useEffect(() => {
-    if (!walletProvider) {
-      setSigner(undefined);
-      setWalletKey(undefined);
-      setVertexWallet(undefined);
-      setVertexClient(undefined);
-    }
-  }, [walletProvider]);
-
+  /*
   const getVertexWallet = async () => {
     try {
-      if (walletKey) {
+      if (walletKey && address) {
         const signer = new Wallet(
           walletKey, // add private key, or import, or use .env
           // Use a provider of choice, initialized for the relevant testnet/mainnet network
           new JsonRpcProvider("https://sepolia-rollup.arbitrum.io/rpc", {
             name: "arbitrum-sepolia",
-            chainId: 421614,
+            chainId: targetNetwork.id,
           })
         );
         console.log(signer);
         setVertexWallet(signer);
 
+        // display network of signer
+        const network = await signer.provider?.getNetwork();
+        console.log("network", network?.chainId);
+
+        // create vertex client
         const client = createVertexClient("arbitrumTestnet", {
           signerOrProvider: signer,
         });
@@ -97,15 +163,23 @@ const VertexWallet = () => {
       const error = err as Error;
       console.warn(error.message);
     }
-  };
 
-  const useWallet = async () => {
+    // show remaining linked signer switches
+    await showRemaining(address);
+  };
+  */
+
+  const accountInfo = async () => {
     try {
       if (vertexClient && address) {
         console.log("fetching account info");
+        // const network = await vertexWallet?.provider?.getNetwork();
+        const network =
+          await vertexClient.context.signerOrProvider.provider?.getNetwork();
+        console.log("network", network?.chainId);
         const subaccountData =
           await vertexClient.subaccount.getEngineSubaccountSummary({
-            subaccountOwner: address ?? "0x",
+            subaccountOwner: address,
             subaccountName,
           });
         console.log("exists", subaccountData.exists);
@@ -123,18 +197,30 @@ const VertexWallet = () => {
     }
   };
 
-  const queryOrders = async () => {
+  const orderInfo = async () => {
     try {
       if (vertexClient && address) {
-        console.log("fetching orders for [2, 4]");
         const productIds = [2, 4];
+        console.log(`fetching orders for [${productIds}]`);
         const openOrders =
           await vertexClient.market.getOpenSubaccountMultiProductOrders({
             subaccountOwner: address,
-            subaccountName: "default",
+            subaccountName,
             productIds,
           });
-        console.log(openOrders);
+        for (let orders of openOrders.productOrders) {
+          for (let order of orders.orders) {
+            const qty = BigDecimal(order.totalAmount).div(1e18).toNumber();
+            const expiration = BigDecimal(order.expiration).toNumber();
+            const expireDate = new Date(Date.UTC(1970, 0, 1, 0, 0, expiration));
+            const expiresIn = (expireDate.getTime() - Date.now()) / 1000;
+            prettyPrintJson(
+              `[id: ${orders.productId}] ${qty} @${order.price} (exp in ${expiresIn}s) `,
+              order.orderParams
+            );
+          }
+        }
+        console.log("done");
       } else {
         console.log("no vertexWallet");
       }
@@ -148,6 +234,7 @@ const VertexWallet = () => {
     try {
       if (vertexClient) {
         console.log("placing order");
+        const t1 = performance.now();
         const expTimestamp = {
           type: "default" as OrderExpirationType,
           expirationTime: nowInSeconds() + 60,
@@ -166,7 +253,12 @@ const VertexWallet = () => {
           productId: 2,
         });
 
+        const orderTime = BigDecimal(performance.now())
+          .minus(t1)
+          .decimalPlaces(0)
+          .toNumber();
         prettyPrintJson("Place Order Result", placeOrderResult);
+        console.log("> vertex order time:", orderTime, "ms");
       } else {
         console.log("no vertexWallet");
       }
@@ -176,34 +268,68 @@ const VertexWallet = () => {
     }
   };
 
+  //
+  // show remaining signer linkings
+  //
+  const checkRemaining = async (showAddress: string | undefined) => {
+    if (!showAddress) return;
+    const signerTemp = new Wallet(
+      "0x0123456789012345678901234567890123456789012345678901234567890123",
+      // Use a provider of choice, initialized for the relevant testnet/mainnet network
+      new JsonRpcProvider("https://sepolia-rollup.arbitrum.io/rpc", {
+        name: "arbitrum-sepolia",
+        chainId: targetNetwork.id,
+      })
+    );
+
+    const clientTemp = createVertexClient("arbitrumTestnet", {
+      signerOrProvider: signerTemp,
+    });
+
+    const linkedSigner =
+      await clientTemp.subaccount.getSubaccountLinkedSignerWithRateLimit({
+        subaccount: {
+          subaccountOwner: showAddress,
+          subaccountName,
+        },
+      });
+    console.log("signer", linkedSigner.signer);
+    console.log(
+      "remaining",
+      BigDecimal(linkedSigner.remainingTxs).toNumber(),
+      "for " + showAddress.slice(0, 10) + "..."
+    );
+  };
+
   return (
     <>
       <div className="card">
         <button
           style={{ marginLeft: "1em" }}
           disabled={!walletProvider}
-          onClick={onSignMessage}
+          // onClick={onSignMessage}
+          onClick={createLink}
         >
           Get wallet key
         </button>
-        <button
+        {/* <button
           style={{ marginLeft: "1em" }}
           disabled={!walletKey}
           onClick={getVertexWallet}
         >
           Create wallet
-        </button>
+        </button> */}
         <button
           style={{ marginLeft: "1em" }}
           disabled={!vertexClient}
-          onClick={useWallet}
+          onClick={accountInfo}
         >
           Check balance
         </button>
         <button
           style={{ marginLeft: "1em" }}
           disabled={!vertexClient}
-          onClick={queryOrders}
+          onClick={orderInfo}
         >
           Check orders
         </button>
@@ -228,7 +354,7 @@ const VertexWallet = () => {
 
 export default VertexWallet;
 
-export function prettyPrintJson(label: string, json: any) {
+function prettyPrintJson(label: string, json: any) {
   console.log(label);
   console.log(JSON.stringify(toPrintableObject(json), null, 2));
 }
